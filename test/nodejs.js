@@ -27,10 +27,18 @@ console.log(`Running jsonstat-toolkit v. ${JSONstat("version")} test...`);
   let allTestsPassed = true;
 
   for (const def of definitions) {
-	const J = await JSONstat(def.url, typeof def.type!== "undefined" ? def.type : null);
-	let context = {};
-	if (def.setup) {
-	  context = def.setup(J);
+	let J, context = {};
+	if (def.local) {
+	  // Local (synchronous) test — no URL fetch; setup receives the JSONstat constructor
+	  J = null;
+	  if (def.setup) {
+		context = def.setup(JSONstat);
+	  }
+	} else {
+	  J = await JSONstat(def.url, typeof def.type!== "undefined" ? def.type : null);
+	  if (def.setup) {
+		context = def.setup(J);
+	  }
 	}
 	const testsPassed = iterateTests(def.tests, J, context);
 	if (!testsPassed) {
