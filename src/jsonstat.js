@@ -53,8 +53,11 @@ function jsonstat(o, typedArray){
 			}
 
 			//It's an object (sparse cube) or an incomplete array that must be filled with nulls
-			for(l=0; l<len; l++){
-				ret.push( typeof s[l]==="undefined" ? null: s[l] );
+			ret = new Array(len).fill(null);
+			const keys = Object.keys(s);
+			for (l = 0; l < keys.length; l++) {
+				const k = Number(keys[l]);
+				if (k < len) ret[k] = s[keys[l]];
 			}
 			return ret;
 		},
@@ -553,7 +556,7 @@ jsonstat.prototype.Dice=function(filters, options, drop){
 
 	const
 		originalValue=this.value,
-		ds=clone ? new jsonstat(JSON.parse(JSON.stringify(this))) : this,
+		ds=clone ? new jsonstat(structuredClone(this)) : this,
 		statin=ds.status,
 		objectify = filters => {
 			const obj = {};
@@ -619,26 +622,21 @@ jsonstat.prototype.Dice=function(filters, options, drop){
 			filters=keep(filters);
 		}
 
-		ds
-		.Transform({type: "arrobj", content: "id", field: "id", status: true})
-		.forEach((item) => { //TODO: Remove this extra loop: use Unflatten instead of Transform+forEach
-			let or = [];
+		// Build filter Sets for O(1) lookup instead of indexOf
+		const filterSets = {};
+		ids.forEach(dimid => {
+			filterSets[dimid] = new Set(filters[dimid]);
+		});
 
-			ids.forEach(dimid => {
-				const catids = filters[dimid];
-				let filter = [];
-
-				catids.forEach(id => {
-					filter.push(item[dimid] === id);
-				});
-
-				or.push(filter.indexOf(true) !== -1);
-			});
-
-			if(or.indexOf(false)===-1){//AND
-				value.push(item.value);
-				status.push(item.status);
+		// Direct iteration via Unflatten instead of materializing full Transform
+		ds.Unflatten((coordinates, datapoint) => {
+			for (let fi = 0; fi < ids.length; fi++) {
+				if (!filterSets[ids[fi]].has(coordinates[ids[fi]])) {
+					return; // skip — AND condition failed
+				}
 			}
+			value.push(datapoint.value);
+			status.push(datapoint.status);
 		});
 
 		ids.forEach(dimid => {
@@ -747,6 +745,8 @@ jsonstat.prototype.Data=function(e, include){
 				}
 			}
 		},
+		// Cache for single-category dimension first properties
+		_singleCatCache = {},
 		dimObj2Array = (thisds, sel, type) => {
 			let
 				a=[], i, obj={}
@@ -768,7 +768,16 @@ jsonstat.prototype.Data=function(e, include){
 			for (let d=0, len=di.length; d<len; d++){
 				const id=di[d], cat=sel[id];
 				//If dimension not defined and dim size=1, take first category (user not forced to specify single cat dimensions)
-				a.push(typeof cat==="string" ? cat : dsize[d]===1 ? firstprop(dim[id].category.index) : null);
+				if(typeof cat==="string"){
+					a.push(cat);
+				}else if(dsize[d]===1){
+					if(!(id in _singleCatCache)){
+						_singleCatCache[id]=firstprop(dim[id].category.index);
+					}
+					a.push(_singleCatCache[id]);
+				}else{
+					a.push(null);
+				}
 			}
 
 			return a;
@@ -1295,56 +1304,52 @@ jsonstat.prototype.toTable=function(opts, func){
 
 		total*=dds[i];
 		m*=dds[i];
-		let cat=[];
+		const cat=new Array(dds[i]);
+		// Build position-to-id reverse lookup to avoid O(n^2) inner loop
+		const catIndex=dd[ddi[i]].category.index;
+		const posToId=new Array(dds[i]);
+		const catLabel=dd[ddi[i]].category.label;
+		const useLabel=(opts.content!=="id" && catLabel);
+		for (let catid in catIndex){
+			posToId[catIndex[catid]]=catid;
+		}
 		for (j=0; j<dds[i]; j++){
-			for (let catid in dd[ddi[i]].category.index){
-				if (dd[ddi[i]].category.index[catid]===j){
-					const rowid=(opts.content!=="id" && dd[ddi[i]].category.label) ? dd[ddi[i]].category.label[catid] : catid; //id if not label (Maybe move label normalization from "dimension" to "dataset"?)
-					cat.push(rowid);
-				}
-			}
+			const catid=posToId[j];
+			cat[j]=useLabel ? catLabel[catid] : catid;
 		}
 		dim.push(cat);
 		mult.push(m);
 	}
 	addColValue(opts.vlabel,opts.slabel,status); //Global cols and table
 
-	//end of inversion: now use dim array
+	// Pre-compute divisors for modular arithmetic (replaces repFactor)
 	len=dim.length;
-	for (i=0; i<len; i++){
-		let catexp=[];
-		for (let c=0, len2=dim[i].length; c<len2; c++){
-			//get the label repetitions
-			for (let n=0; n<total/mult[i]; n++){
-				catexp.push(dim[i][c]);
-			}
-		}
-		dimexp.push(catexp);
+	const divisors=new Array(len);
+	let div=1;
+	for (i=len-1; i>=0; i--){
+		divisors[i]=div;
+		div*=dds[i];
 	}
-	len=dimexp.length;
+	// Cache dim sizes for inner loop
+	const dimSizes=new Array(len);
 	for (i=0; i<len; i++){
-		let l=[], e=0;
-		for (x=0; x<total; x++){
-			l.push(dimexp[i][e]);
-			e++;
-			if (e===dimexp[i].length){
-				e=0;
-			}
-		}
-		label.push(l);
+		dimSizes[i]=dim[i].length;
 	}
+
+	const valueArr=this.value;
+	const statusArr=this.status;
+
 	for (x=0; x<total; x++){
 		row=[];
-		len=dimexp.length;
 		for (let d=0; d<len; d++){
-			addRow(label[d][x]); //Global row
+			addRow(dim[d][(x / divisors[d] | 0) % dimSizes[d]]); //Global row
 		}
 		if(status){
 			addRow(
-				(this.status) ? this.status[x] : null
+				statusArr ? statusArr[x] : null
 			);
 		}
-		addRowValue(this.value[x]); //Global row, rows and table
+		addRowValue(valueArr[x]); //Global row, rows and table
 	}
 
 	if(opts.type==="object"){
@@ -1372,45 +1377,42 @@ jsonstat.prototype.Unflatten = function (callback) {
 		dims = this.id,
 		size = this.size,
 		ndims = dims.length,
+		n = this.n,
+		value = this.value,
+		status = this.status,
 		cells = [],
-		dimCats = [],
-		counters = new Array(ndims).fill(0)
+		dimCats = new Array(ndims)
 	;
 
-	for (let i = 0; i < ndims; i++) {
-		dimCats.push(this.Dimension(i).id);
+	// Pre-compute divisors for modular arithmetic (avoids counter increment/reset)
+	// For dimension i: catIndex = Math.floor(flatIndex / divisor[i]) % size[i]
+	const divisors = new Array(ndims);
+	let divisor = 1;
+	for (let i = ndims - 1; i >= 0; i--) {
+		divisors[i] = divisor;
+		divisor *= size[i];
+		dimCats[i] = this.Dimension(i).id;
 	}
 
-	for (let index = 0; index < this.n; index++) {
-		const
-			coord = {},
-			point = {
-				value: this.value[index],
-				status: (this.status) ? this.status[index] : null
-			}
-		;
+	for (let index = 0; index < n; index++) {
+		const coord = {};
 
 		for (let i = 0; i < ndims; i++) {
-			coord[dims[i]] = dimCats[i][counters[i]];
+			coord[dims[i]] = dimCats[i][(index / divisors[i] | 0) % size[i]];
 		}
 
 		const result = callback(
 			coord,
-			point,
+			{
+				value: value[index],
+				status: status ? status[index] : null
+			},
 			index,
 			cells
 		);
 
 		if (typeof result !== 'undefined') {
 			cells.push(result);
-		}
-
-		for (let i = ndims - 1; i >= 0; i--) {
-			counters[i]++;
-			if (counters[i] < size[i]) {
-				break;
-			}
-			counters[i] = 0;
 		}
 	}
 
@@ -1469,91 +1471,150 @@ jsonstat.prototype.Transform=function(opts){
 		fmt = comma ? dot2comma : (v => v)
 	;
 
-	let callback, header, unflattened;
+	// Pre-build integer-indexed label arrays: labelArrays[dimIdx][catIdx] → label string
+	// Also cache dimension category ID arrays as flat indexed structures
+	const
+		nValid = validIds.length,
+		dimCatIds = new Array(nValid),  // dimCatIds[i] = array of category IDs for validIds[i]
+		labelArrays = (content === "label") ? new Array(nValid) : null
+	;
+
+	for (let i = 0; i < nValid; i++) {
+		const
+			dimId = validIds[i],
+			dim = ds.Dimension(dimId),
+			catIds = dim.id
+		;
+		dimCatIds[i] = catIds;
+		if (labelArrays) {
+			const catLabels = dim.__tree__.category.label;
+			if (catLabels) {
+				// Build flat integer-indexed array: labelArrays[i][catIdx] = label
+				const arr = new Array(catIds.length);
+				for (let j = 0, jlen = catIds.length; j < jlen; j++) {
+					arr[j] = catLabels[catIds[j]];
+				}
+				labelArrays[i] = arr;
+			} else {
+				labelArrays[i] = null;
+			}
+		}
+	}
+
+	// Pre-compute dimension index positions within full dataset for modular arithmetic
+	// Map from validIds index to position in ds.id
+	const
+		allSize = ds.size,
+		ndims = ids.length,
+		n = ds.n,
+		value = ds.value,
+		dsStatus = ds.status
+	;
+
+	// Build divisors for ALL dimensions (needed for coordinate computation)
+	const allDivisors = new Array(ndims);
+	let divisor = 1;
+	for (let i = ndims - 1; i >= 0; i--) {
+		allDivisors[i] = divisor;
+		divisor *= allSize[i];
+	}
+
+	// Map validIds to their indices in the full dimension array
+	const validDimIndices = new Array(nValid);
+	for (let i = 0; i < nValid; i++) {
+		validDimIndices[i] = ids.indexOf(validIds[i]);
+	}
+
+	// Pre-compute divisors and sizes for valid dimensions only
+	const validDivisors = new Array(nValid);
+	const validSizes = new Array(nValid);
+	for (let i = 0; i < nValid; i++) {
+		const idx = validDimIndices[i];
+		validDivisors[i] = allDivisors[idx];
+		validSizes[i] = allSize[idx];
+	}
+
+	// Helper: get label for dimension i, category index catIdx
+	// Uses integer-indexed arrays for O(1) lookup
+	const getLabel = labelArrays
+		? (i, catIdx) => (labelArrays[i] ? labelArrays[i][catIdx] : dimCatIds[i][catIdx])
+		: (i, catIdx) => dimCatIds[i][catIdx]
+	;
+
+	let header, unflattened;
 
 	switch (type) {
 		case "array": {
 			const
 				dimLabels = (field === "label") ? validIds.map(id => ds.Dimension(id).label) : validIds,
-				labels = status ? [slabel, vlabel] : [vlabel],
-				dims = validIds.map(id => ds.Dimension(id))
+				labels = status ? [slabel, vlabel] : [vlabel]
 			;
 
 			header = dimLabels.concat(labels);
 
-			const addStatusArray = status ? (ret, dp) => ret.push(dp.status) : () => { };
+			// Inline iteration — avoid Unflatten callback overhead
+			const rows = new Array(n);
+			for (let index = 0; index < n; index++) {
+				const ret = new Array(nValid + (status ? 2 : 1));
 
-			callback = (coordinates, datapoint) => {
-				const ret = [];
-
-				for (let i = 0, len = validIds.length; i < len; i++) {
-					const
-						dimId = validIds[i],
-						d = dims[i]
-					;
-
-					ret.push(content === "label" ? d.Category(coordinates[dimId]).label : coordinates[dimId]);
+				for (let i = 0; i < nValid; i++) {
+					const catIdx = (index / validDivisors[i] | 0) % validSizes[i];
+					ret[i] = getLabel(i, catIdx);
 				}
 
-				addStatusArray(ret, datapoint);
-				ret.push(fmt(datapoint.value));
+				if (status) {
+					ret[nValid] = dsStatus ? dsStatus[index] : null;
+					ret[nValid + 1] = fmt(value[index]);
+				} else {
+					ret[nValid] = fmt(value[index]);
+				}
 
-				return ret;
-			};
+				rows[index] = ret;
+			}
 
-			unflattened = ds.Unflatten(callback);
+			unflattened = rows;
 			break;
 		}
 
 		case "object": {
 			const
-				gDims = validIds.map(id => ds.Dimension(id)),
-				valuetype = (typeof ds.value[0] === "number" || ds.value[0] === null) ? "number" : "string",
-				cols = []
+				valuetype = (typeof value[0] === "number" || value[0] === null) ? "number" : "string",
+				cols = new Array(nValid + (status ? 2 : 1))
 			;
 
-			for (let i = 0, len = validIds.length; i < len; i++) {
+			for (let i = 0; i < nValid; i++) {
 				const
 					dimId = validIds[i],
-					dim = gDims[i],
+					dim = ds.Dimension(dimId),
 					colLabel = field === "id" ? dimId : (dim.label || dimId)
 				;
-
-				cols.push({ id: dimId, label: colLabel, type: "string" });
+				cols[i] = { id: dimId, label: colLabel, type: "string" };
 			}
 
+			let colIdx = nValid;
 			if (status) {
-				cols.push({ id: "status", label: slabel, type: "string" });
+				cols[colIdx++] = { id: "status", label: slabel, type: "string" };
 			}
+			cols[colIdx] = { id: "value", label: vlabel, type: valuetype };
 
-			cols.push({ id: "value", label: vlabel, type: valuetype });
+			// Inline iteration
+			const rows = new Array(n);
+			for (let index = 0; index < n; index++) {
+				const row = new Array(nValid + (status ? 2 : 1));
 
-			const
-				addStatusCell = status
-					? (row, dp) => row.push({ v: dp.status })
-					: () => {}
-				,
-				rows = ds.Unflatten((coordinates, datapoint) => {
-					const row = [];
+				for (let i = 0; i < nValid; i++) {
+					const catIdx = (index / validDivisors[i] | 0) % validSizes[i];
+					row[i] = { v: getLabel(i, catIdx) };
+				}
 
-					for (let i = 0, len = validIds.length; i < len; i++) {
-						const
-							dimId = validIds[i],
-							d = gDims[i],
-							cat = coordinates[dimId]
-						;
+				let ri = nValid;
+				if (status) {
+					row[ri++] = { v: dsStatus ? dsStatus[index] : null };
+				}
+				row[ri] = { v: value[index] };
 
-						row.push({
-							v: content === "label" ? d.Category(cat).label : cat
-						});
-					}
-
-					addStatusCell(row, datapoint);
-					row.push({ v: datapoint.value });
-
-					return { c: row };
-				})
-			;
+				rows[index] = { c: row };
+			}
 
 			return { cols: cols, rows: rows };
 		}
@@ -1563,74 +1624,90 @@ jsonstat.prototype.Transform=function(opts){
 				// Helper for array formatting
 				dec = comma ? (v => v.map(dot2comma)) : (v => v),
 				getField = field === "id" ? id => id : id => ds.Dimension(id).label,
-				getContent = content === "id" ? (id, coord) => coord : (id, coord) => ds.Dimension(id).Category(coord).label,
-
 				result = {}
 			;
 
+			// Build a map from validIds index to field name (cached, not computed per cell)
+			const fieldNames = new Array(nValid);
+			for (let i = 0; i < nValid; i++) {
+				fieldNames[i] = getField(validIds[i]);
+			}
+
 			if (by) {
 				const
-					otherIds = validIds.filter(id => id !== by),
+					byFullIdx = ids.indexOf(by),
+					byDivisor = allDivisors[byFullIdx],
+					bySize = allSize[byFullIdx],
+					otherIndices = [], // indices into validIds that are NOT the by dimension
+					otherFieldNames = [],
 					byDim = ds.Dimension(by),
-					rowMap = new Map(), // To track row indices by key
-					catToKey = {} // Optimization: map category ID to result key
+					rowMap = new Map(),
+					catToKey = new Array(bySize) // integer-indexed: catIdx → result key
 				;
 
-				// Initialize columns for non-pivoted dimensions
-				otherIds.forEach(id => {
-					result[getField(id)] = [];
-				});
+				for (let i = 0; i < nValid; i++) {
+					if (validIds[i] !== by) {
+						otherIndices.push(i);
+						otherFieldNames.push(fieldNames[i]);
+					}
+				}
+				const nOther = otherIndices.length;
 
-				// Initialize columns for pivoted values (categories of 'by' dimension)
-				byDim.id.forEach(catId => {
+				// Initialize columns for non-pivoted dimensions
+				for (let i = 0; i < nOther; i++) {
+					result[otherFieldNames[i]] = [];
+				}
+
+				// Initialize columns for pivoted values
+				const catKeys = new Array(bySize);
+				for (let j = 0; j < bySize; j++) {
+					const catId = byDim.id[j];
 					const key = prefix + (field === "id" ? catId : byDim.Category(catId).label);
-					catToKey[catId] = key;
+					catKeys[j] = key;
+					catToKey[j] = key;
 					result[key] = [];
-				});
+				}
 
 				let rowIndex = 0;
 
-				callback = function(coordinates, datapoint) {
-					// Create a unique key for the row based on other dimensions
-					const rowKey = otherIds.map(id => coordinates[id]).join("\0");
+				// Inline iteration
+				for (let index = 0; index < n; index++) {
+					// Build row key from other dimensions
+					let rowKey = "";
+					for (let i = 0; i < nOther; i++) {
+						const oi = otherIndices[i];
+						const catIdx = (index / validDivisors[oi] | 0) % validSizes[oi];
+						if (i > 0) rowKey += "\0";
+						rowKey += dimCatIds[oi][catIdx];
+					}
 
 					let idx;
 					if (rowMap.has(rowKey)) {
 						idx = rowMap.get(rowKey);
 					} else {
-						// New row encountered
 						idx = rowIndex++;
 						rowMap.set(rowKey, idx);
 
 						// Fill metadata columns
-						otherIds.forEach(id => {
-							result[getField(id)].push(getContent(id, coordinates[id]));
-						});
-
-						// Initialize value columns with null
-						for (const key in result) {
-							if (!otherIds.includes(key) && result[key].length < idx + 1) { // Check if it's a value column
-								// Actually, we can just iterate byDim keys
-							}
+						for (let i = 0; i < nOther; i++) {
+							const oi = otherIndices[i];
+							const catIdx = (index / validDivisors[oi] | 0) % validSizes[oi];
+							result[otherFieldNames[i]].push(getLabel(oi, catIdx));
 						}
-						// Better: Explicitly push null to all value columns
-						Object.values(catToKey).forEach(k => {
-							result[k].push(null);
-						});
+
+						// Initialize all value columns with null
+						for (let j = 0; j < bySize; j++) {
+							result[catKeys[j]].push(null);
+						}
 					}
 
-					// Assign value to the correct column
-					const 
-						targetKey = catToKey[coordinates[by]],
-						val = datapoint.value
-					;
-					
+					// Assign value
+					const byCatIdx = (index / byDivisor | 0) % bySize;
+					const val = value[index];
 					if (val !== null) {
-						result[targetKey][idx] = fmt(val);
+						result[catToKey[byCatIdx]][idx] = fmt(val);
 					}
-				};
-
-				ds.Unflatten(callback);
+				}
 			} else {
 				// Standard behavior
 				if (status) {
@@ -1640,17 +1717,17 @@ jsonstat.prototype.Transform=function(opts){
 					result[vlabel] = dec(ds.value);
 				}
 
-				validIds.forEach(id => {
-					result[getField(id)] = [];
-				});
+				for (let i = 0; i < nValid; i++) {
+					result[fieldNames[i]] = new Array(n);
+				}
 
-				callback = function(coordinates, datapoint) {
-					validIds.forEach(id => {
-						result[getField(id)].push(getContent(id, coordinates[id]));
-					});
-				};
-
-				ds.Unflatten(callback);
+				// Inline iteration
+				for (let index = 0; index < n; index++) {
+					for (let i = 0; i < nValid; i++) {
+						const catIdx = (index / validDivisors[i] | 0) % validSizes[i];
+						result[fieldNames[i]][index] = getLabel(i, catIdx);
+					}
+				}
 			}
 
 			unflattened = result;
@@ -1660,54 +1737,50 @@ jsonstat.prototype.Transform=function(opts){
 		//case "arrobj"
 		default: {
 			const
-				pivotMap = new Map(),
-				validDims = []
+				pivotMap = by ? new Map() : null,
+				validDims = new Array(nValid)
 			;
 
-			validIds.forEach(dimId => {
-				const dim = ds.Dimension(dimId);
-
-				validDims.push({
-					id: dimId,
-					dim: dim,
+			for (let i = 0; i < nValid; i++) {
+				const
+					dimId = validIds[i],
+					dim = ds.Dimension(dimId)
+				;
+				validDims[i] = {
 					prop: (field === "label") ? dim.label : dimId,
 					isBy: (by && dimId === by)
-				});
-			});
+				};
+			}
 
-			const addStatusObj = status ? (ret, dp) => { ret[slabel] = dp.status; } : () => { };
+			const addStatusObj = status ? (ret, s) => { ret[slabel] = s; } : () => { };
 
-			callback = (coordinates, datapoint) => {
-				const ret = {};
+			if (by) {
+				// Pivot mode: inline iteration
+				const cells = [];
 
-				let pivotColValue;
+				for (let index = 0; index < n; index++) {
+					const ret = {};
+					let pivotColValue;
 
-				for (let i = 0, len = validDims.length; i < len; i++) {
-					const
-						d = validDims[i],
-						dId = d.id,
-						dProp = d.prop,
-						dIsBy = d.isBy,
-						cat = coordinates[dId],
-						val = content === "label" ? d.dim.Category(cat).label : cat
-					;
+					for (let i = 0; i < nValid; i++) {
+						const
+							catIdx = (index / validDivisors[i] | 0) % validSizes[i],
+							val = getLabel(i, catIdx)
+						;
 
-					if (dIsBy) {
-						pivotColValue = val;
-					} else {
-						ret[dProp] = val;
+						if (validDims[i].isBy) {
+							pivotColValue = val;
+						} else {
+							ret[validDims[i].prop] = val;
+						}
 					}
-				}
 
-				if (by) {
-					addStatusObj(ret, datapoint);
+					addStatusObj(ret, dsStatus ? dsStatus[index] : null);
 
 					const signature = Object.values(ret).join('|');
 
-					let
-						targetRow = pivotMap.get(signature),
-						isNew = false
-					;
+					let targetRow = pivotMap.get(signature);
+					let isNew = false;
 
 					if (!targetRow) {
 						targetRow = ret;
@@ -1715,19 +1788,34 @@ jsonstat.prototype.Transform=function(opts){
 						isNew = true;
 					}
 
-					const dynamicKey = prefix + pivotColValue;
-					targetRow[dynamicKey] = fmt(datapoint.value);
+					targetRow[prefix + pivotColValue] = fmt(value[index]);
 
-					return isNew ? targetRow : undefined;
+					if (isNew) {
+						cells.push(targetRow);
+					}
 				}
 
-				ret[vlabel] = fmt(datapoint.value);
-				addStatusObj(ret, datapoint);
+				unflattened = cells;
+			} else {
+				// Non-pivot mode: inline iteration, pre-allocate array
+				const cells = new Array(n);
 
-				return ret;
-			};
+				for (let index = 0; index < n; index++) {
+					const ret = {};
 
-			unflattened = ds.Unflatten(callback);
+					for (let i = 0; i < nValid; i++) {
+						const catIdx = (index / validDivisors[i] | 0) % validSizes[i];
+						ret[validDims[i].prop] = getLabel(i, catIdx);
+					}
+
+					ret[vlabel] = fmt(value[index]);
+					addStatusObj(ret, dsStatus ? dsStatus[index] : null);
+
+					cells[index] = ret;
+				}
+
+				unflattened = cells;
+			}
 		}
 	}
 
@@ -1770,6 +1858,106 @@ jsonstat.prototype.Transform=function(opts){
 	} else {
 		//does nothing
 		return unflattened;
+	}
+};
+
+/**
+ * Export the dataset as a CSV string.
+ * Uses modular arithmetic over dimension sizes — no intermediate table.
+ * @param {Object} [opts] - { delimiter: string (default ","), header: boolean (default true) }
+ * @returns {string|null} CSV string
+ */
+jsonstat.prototype.toCSV = function (opts) {
+	if (this === null || this.class !== "dataset" || this.value === null) {
+		return null;
+	}
+
+	opts = opts || {};
+	const
+		delim = opts.delimiter || ",",
+		includeHeader = opts.header !== false,
+		dims = this.id,
+		size = this.size,
+		ndims = dims.length,
+		n = this.n,
+		value = this.value,
+		dimCats = new Array(ndims)
+	;
+
+	// Pre-compute divisors for modular arithmetic
+	const divisors = new Array(ndims);
+	let divisor = 1;
+	for (let i = ndims - 1; i >= 0; i--) {
+		divisors[i] = divisor;
+		divisor *= size[i];
+		dimCats[i] = this.Dimension(i).id;
+	}
+
+	// Pre-allocate lines array
+	const lines = new Array(includeHeader ? n + 1 : n);
+	let lineIdx = 0;
+
+	// Header
+	if (includeHeader) {
+		lines[lineIdx++] = dims.concat("value").join(delim);
+	}
+
+	// Data rows — use modular arithmetic, build string directly
+	for (let index = 0; index < n; index++) {
+		let line = dimCats[0][(index / divisors[0] | 0) % size[0]];
+
+		for (let i = 1; i < ndims; i++) {
+			line += delim + dimCats[i][(index / divisors[i] | 0) % size[i]];
+		}
+
+		line += delim + value[index];
+		lines[lineIdx++] = line;
+	}
+
+	return lines.join("\n");
+};
+
+/**
+ * Returns a generator that yields one row-object per observation.
+ * Each object has dimension IDs as keys (with category IDs as values)
+ * plus "value" and "status".
+ * @returns {Generator}
+ */
+jsonstat.prototype.unflattenIterator = function* () {
+	if (this === null || this.class !== "dataset" || this.value === null) {
+		return;
+	}
+
+	const
+		dims = this.id,
+		size = this.size,
+		ndims = dims.length,
+		n = this.n,
+		value = this.value,
+		status = this.status,
+		dimCats = new Array(ndims)
+	;
+
+	// Pre-compute divisors for modular arithmetic
+	const divisors = new Array(ndims);
+	let divisor = 1;
+	for (let i = ndims - 1; i >= 0; i--) {
+		divisors[i] = divisor;
+		divisor *= size[i];
+		dimCats[i] = this.Dimension(i).id;
+	}
+
+	for (let index = 0; index < n; index++) {
+		const row = {};
+
+		for (let i = 0; i < ndims; i++) {
+			row[dims[i]] = dimCats[i][(index / divisors[i] | 0) % size[i]];
+		}
+
+		row.value = value[index];
+		row.status = status ? status[index] : null;
+
+		yield row;
 	}
 };
 

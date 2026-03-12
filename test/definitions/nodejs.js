@@ -594,4 +594,150 @@ module.exports = [
 	  },
 	],
   },
+  {
+	// fromRows, toCSV, unflattenIterator tests (synchronous — no URL fetch)
+	local: true,
+	setup: (JSONstat) => {
+	  const ds = JSONstat.fromRows(
+		["country", "year", "revenue"],
+		[["US", "2025", 100], ["UK", "2025", 200]],
+		{ measures: ["revenue"] }
+	  );
+	  const dsMulti = JSONstat.fromRows(
+		["country", "a", "b"],
+		[["US", 1, 2]],
+		{ measures: ["a", "b"] }
+	  );
+	  const dsTime = JSONstat.fromRows(
+		["year", "val"],
+		[["2025", 10]],
+		{ measures: ["val"], timeDimensions: ["year"] }
+	  );
+	  const dsMeasuresOnly = JSONstat.fromRows(
+		["a", "b"],
+		[[1, 2]],
+		{ measures: ["a", "b"] }
+	  );
+	  return { ds, dsMulti, dsTime, dsMeasuresOnly };
+	},
+	tests: [
+	  // fromRows basic
+	  {
+		text: "fromRows: class is dataset",
+		real: (J, { ds }) => ds.class,
+		exp: "dataset",
+	  },
+	  {
+		text: "fromRows: dimension ids",
+		real: (J, { ds }) => JSON.stringify(ds.id),
+		exp: '["country","year","metric"]',
+	  },
+	  {
+		text: "fromRows: size array",
+		real: (J, { ds }) => JSON.stringify(ds.size),
+		exp: "[2,1,1]",
+	  },
+	  {
+		text: "fromRows: first value",
+		real: (J, { ds }) => ds.value[0],
+		exp: 100,
+	  },
+	  {
+		text: "fromRows: second value",
+		real: (J, { ds }) => ds.value[1],
+		exp: 200,
+	  },
+	  {
+		text: "fromRows: n observations",
+		real: (J, { ds }) => ds.n,
+		exp: 2,
+	  },
+	  {
+		text: "fromRows: country categories",
+		real: (J, { ds }) => JSON.stringify(ds.Dimension("country").id),
+		exp: '["US","UK"]',
+	  },
+	  {
+		text: "fromRows: Data by label lookup",
+		real: (J, { ds }) => ds.Data({ country: "UK", year: "2025", metric: "revenue" }).value,
+		exp: 200,
+	  },
+	  // fromRows multiple measures
+	  {
+		text: "fromRows multi-measure: metric categories",
+		real: (J, { dsMulti }) => JSON.stringify(dsMulti.Dimension("metric").id),
+		exp: '["a","b"]',
+	  },
+	  {
+		text: "fromRows multi-measure: values",
+		real: (J, { dsMulti }) => JSON.stringify(Array.from(dsMulti.value)),
+		exp: "[1,2]",
+	  },
+	  {
+		text: "fromRows multi-measure: size",
+		real: (J, { dsMulti }) => JSON.stringify(dsMulti.size),
+		exp: "[1,2]",
+	  },
+	  // fromRows time dimension
+	  {
+		text: "fromRows time: role.time",
+		real: (J, { dsTime }) => dsTime.role.time[0],
+		exp: "year",
+	  },
+	  // fromRows measures-only
+	  {
+		text: "fromRows measures-only: single metric dimension",
+		real: (J, { dsMeasuresOnly }) => JSON.stringify(dsMeasuresOnly.id),
+		exp: '["metric"]',
+	  },
+	  {
+		text: "fromRows measures-only: size",
+		real: (J, { dsMeasuresOnly }) => JSON.stringify(dsMeasuresOnly.size),
+		exp: "[2]",
+	  },
+	  {
+		text: "fromRows measures-only: values",
+		real: (J, { dsMeasuresOnly }) => JSON.stringify(Array.from(dsMeasuresOnly.value)),
+		exp: "[1,2]",
+	  },
+	  // toCSV basic
+	  {
+		text: "toCSV: header row present",
+		real: (J, { ds }) => ds.toCSV().split("\n")[0],
+		exp: "country,year,metric,value",
+	  },
+	  {
+		text: "toCSV: first data row",
+		real: (J, { ds }) => ds.toCSV().split("\n")[1],
+		exp: "US,2025,revenue,100",
+	  },
+	  {
+		text: "toCSV: row count (header + 2 data)",
+		real: (J, { ds }) => ds.toCSV().split("\n").length,
+		exp: 3,
+	  },
+	  // toCSV custom delimiter
+	  {
+		text: "toCSV: tab delimiter",
+		real: (J, { ds }) => ds.toCSV({ delimiter: "\t" }).split("\n")[0],
+		exp: "country\tyear\tmetric\tvalue",
+	  },
+	  // unflattenIterator basic
+	  {
+		text: "unflattenIterator: first row country",
+		real: (J, { ds }) => ds.unflattenIterator().next().value.country,
+		exp: "US",
+	  },
+	  {
+		text: "unflattenIterator: first row value",
+		real: (J, { ds }) => ds.unflattenIterator().next().value.value,
+		exp: 100,
+	  },
+	  {
+		text: "unflattenIterator: iteration count",
+		real: (J, { ds }) => { let c = 0; for (const _ of { [Symbol.iterator]: () => ds.unflattenIterator() }) c++; return c; },
+		exp: 2,
+	  },
+	],
+  },
 ];
